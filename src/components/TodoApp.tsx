@@ -1,57 +1,55 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { supabase, type TodoRow } from "@/lib/supabase";
 import TodoItem from "./TodoItem";
 
 export type Todo = {
   id: string;
   text: string;
   completed: boolean;
-  createdAt: number;
+  createdAt: string;
 };
 
 export type Filter = "all" | "active" | "completed";
 
-const STORAGE_KEY = "todo-app:v1";
-
-function loadTodos(): Todo[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (t): t is Todo =>
-        t &&
-        typeof t.id === "string" &&
-        typeof t.text === "string" &&
-        typeof t.completed === "boolean" &&
-        typeof t.createdAt === "number",
-    );
-  } catch {
-    return [];
-  }
+function fromRow(r: TodoRow): Todo {
+  return {
+    id: r.id,
+    text: r.text,
+    completed: r.completed,
+    createdAt: r.created_at,
+  };
 }
 
 export default function TodoApp() {
   const [todos, setTodos] = useState<Todo[]>([]);
   const [filter, setFilter] = useState<Filter>("all");
   const [draft, setDraft] = useState("");
-  const [hydrated, setHydrated] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    // Hydrate from localStorage on mount; not available during SSR.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setTodos(loadTodos());
-    setHydrated(true);
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await supabase
+        .from("todos")
+        .select("id,text,completed,created_at")
+        .order("created_at", { ascending: false });
+      if (cancelled) return;
+      if (error) {
+        setError(error.message);
+      } else {
+        setTodos((data ?? []).map(fromRow));
+        setError(null);
+      }
+      setLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
-
-  useEffect(() => {
-    if (!hydrated) return;
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(todos));
-  }, [todos, hydrated]);
 
   const remaining = useMemo(
     () => todos.reduce((n, t) => n + (t.completed ? 0 : 1), 0),
@@ -65,47 +63,97 @@ export default function TodoApp() {
     return todos;
   }, [todos, filter]);
 
-  function addTodo(text: string) {
+  async function addTodo(text: string) {
     const trimmed = text.trim();
     if (!trimmed) return;
-    setTodos((prev) => [
-      {
-        id:
-          typeof crypto !== "undefined" && "randomUUID" in crypto
-            ? crypto.randomUUID()
-            : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-        text: trimmed,
-        completed: false,
-        createdAt: Date.now(),
-      },
-      ...prev,
-    ]);
     setDraft("");
+    const { data, error } = await supabase
+      .from("todos")
+      .insert({ text: trimmed })
+      .select("id,text,completed,created_at")
+      .single();
+    if (error || !data) {
+      setError(error?.message ?? "Failed to add task");
+      setDraft(trimmed);
+      return;
+    }
+    setError(null);
+    setTodos((prev) => [fromRow(data), ...prev]);
   }
 
-  function toggleTodo(id: string) {
+  async function toggleTodo(id: string) {
+    const target = todos.find((t) => t.id === id);
+    if (!target) return;
+    const next = !target.completed;
     setTodos((prev) =>
-      prev.map((t) => (t.id === id ? { ...t, completed: !t.completed } : t)),
+      prev.map((t) => (t.id === id ? { ...t, completed: next } : t)),
     );
+    const { error } = await supabase
+      .from("todos")
+      .update({ completed: next })
+      .eq("id", id);
+    if (error) {
+      setError(error.message);
+      setTodos((prev) =>
+        prev.map((t) => (t.id === id ? { ...t, completed: !next } : t)),
+      );
+    } else {
+      setError(null);
+    }
   }
 
-  function updateTodo(id: string, text: string) {
+  async function updateTodo(id: string, text: string) {
     const trimmed = text.trim();
     if (!trimmed) {
       removeTodo(id);
       return;
     }
+    const prevText = todos.find((t) => t.id === id)?.text;
+    if (prevText === trimmed) return;
     setTodos((prev) =>
       prev.map((t) => (t.id === id ? { ...t, text: trimmed } : t)),
     );
+    const { error } = await supabase
+      .from("todos")
+      .update({ text: trimmed })
+      .eq("id", id);
+    if (error) {
+      setError(error.message);
+      if (prevText !== undefined) {
+        setTodos((prev) =>
+          prev.map((t) => (t.id === id ? { ...t, text: prevText } : t)),
+        );
+      }
+    } else {
+      setError(null);
+    }
   }
 
-  function removeTodo(id: string) {
-    setTodos((prev) => prev.filter((t) => t.id !== id));
+  async function removeTodo(id: string) {
+    const snapshot = todos;
+    setTodos((p) => p.filter((t) => t.id !== id));
+    const { error } = await supabase.from("todos").delete().eq("id", id);
+    if (error) {
+      setError(error.message);
+      setTodos(snapshot);
+    } else {
+      setError(null);
+    }
   }
 
-  function clearCompleted() {
-    setTodos((prev) => prev.filter((t) => !t.completed));
+  async function clearCompleted() {
+    const snapshot = todos;
+    setTodos((p) => p.filter((t) => !t.completed));
+    const { error } = await supabase
+      .from("todos")
+      .delete()
+      .eq("completed", true);
+    if (error) {
+      setError(error.message);
+      setTodos(snapshot);
+    } else {
+      setError(null);
+    }
   }
 
   return (
@@ -167,15 +215,30 @@ export default function TodoApp() {
           ))}
         </ul>
 
-        {hydrated && todos.length === 0 && (
+        {loading && (
+          <div className="px-6 py-12 text-center text-sm text-[var(--muted)]">
+            Loading…
+          </div>
+        )}
+
+        {!loading && todos.length === 0 && !error && (
           <div className="px-6 py-12 text-center text-sm text-[var(--muted)]">
             Nothing here yet. Add your first task above.
           </div>
         )}
 
-        {hydrated && todos.length > 0 && visible.length === 0 && (
+        {!loading && todos.length > 0 && visible.length === 0 && (
           <div className="px-6 py-12 text-center text-sm text-[var(--muted)]">
             No {filter} tasks.
+          </div>
+        )}
+
+        {error && (
+          <div
+            role="alert"
+            className="border-t border-[var(--card-border)] px-4 py-3 text-center text-sm text-[var(--danger)]"
+          >
+            {error}
           </div>
         )}
 
@@ -217,7 +280,7 @@ export default function TodoApp() {
       </section>
 
       <p className="mt-4 text-center text-xs text-[var(--muted)]">
-        Double-click a task to edit. Saved locally in your browser.
+        Double-click a task to edit. Synced to Supabase.
       </p>
     </div>
   );
