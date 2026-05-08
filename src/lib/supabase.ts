@@ -16,16 +16,28 @@ export type TodoRow = {
   created_at: string;
 };
 
-export const supabase = createClient<{
+type Database = {
   public: {
     Tables: {
       todos: {
         Row: TodoRow;
-        Insert: { id?: string; text: string; completed?: boolean; created_at?: string };
+        Insert: {
+          id?: string;
+          text: string;
+          completed?: boolean;
+          created_at?: string;
+        };
         Update: Partial<Pick<TodoRow, "text" | "completed">>;
+        Relationships: [];
       };
     };
+    Views: Record<string, never>;
+    Functions: Record<string, never>;
+    Enums: Record<string, never>;
+    CompositeTypes: Record<string, never>;
   };
-}>(url, key, {
+};
+
+export const supabase = createClient<Database>(url, key, {
   auth: { persistSession: false },
 });
